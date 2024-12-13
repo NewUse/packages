@@ -1,0 +1,188 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=05
+USE_PROCD=1
+
+SETTINGS="settings.json"
+
+enable_tr_proxy() {
+    local lanaddr lport fports
+    config_load pegasocks
+    config_get ftports settings tp_fwd_tcp_ports "80 443"
+    config_get fuports settings tp_fwd_udp_ports "443"
+    config_get lport settings port 1080
+    config_load "network"
+    config_get lanaddr lan ipaddr
+
+    for fp in $ftports
+    do     
+        json_add_object ""
+        json_add_string type redirect
+        json_add_string name "Transparent Proxy Redirect tcp port $fp"
+        json_add_string src lan
+        json_add_string proto tcp
+        json_add_string dest_port "$lport"
+        json_add_string src_dip "!$lanaddr"
+        json_add_string dest_ip "$lanaddr"
+        json_add_string src_dport "$fp"
+        json_add_string dest lan
+        json_close_object
+    done
+
+    for fp in $fuports
+    do     
+        json_add_object ""
+        json_add_string type redirect
+        json_add_string name "Transparent Proxy Redirect udp port $fp"
+        json_add_string src lan
+        json_add_string proto udp
+        json_add_string dest_port "$lport"
+        json_add_string src_dip "!$lanaddr"
+        json_add_string dest_ip "$lanaddr"
+        json_add_string src_dport "$fp"
+        json_add_string dest lan
+        json_close_object
+    done
+}
+
+load_server () {
+    local proto port host pass sni ws_path ws_host enc
+    config_get proto $1 proto "v2ray"
+    config_get host $1 host
+    config_get dport $1 port "443"
+    config_get pass $1 pass
+    config_get sni $1 sni
+    config_get ws_path $1 ws_path
+    config_get ws_host $1 ws_host
+    config_get enc $1 enc
+
+    json_add_object ""
+    json_add_string "server_address" "$host"
+    json_add_string "server_type" "$proto"
+    json_add_int "server_port" "$dport"
+    json_add_string "password" "$pass"
+    if [ -n "$ws_path" ] || [ -n "$ws_host" ]; then
+	json_add_object "websocket"
+	if [ -n "$ws_path" ]; then
+            json_add_string "path" "$ws_path"
+	fi
+	if [ -n "$ws_host" ]; then
+            json_add_string "hostname" "$ws_host"
+	fi
+	json_close_object
+    fi
+    if [ -n "$sni" ]; then
+	json_add_object "ssl"
+        json_add_string "sni" "$sni"
+	json_close_object
+    fi
+    if [ -n "$enc" ]; then
+	if [ "$proto" = "v2ray" ]; then
+            json_add_string "secure" "$enc"
+	else
+	    json_add_string "method" "$enc"
+	fi 
+    fi
+    json_close_object
+}
+
+
+load_config() {
+    local lport lanaddr log_l crt ssl_verify dns ping_i
+    config_load "network"
+    config_get lanaddr lan ipaddr
+
+    config_load "pegasocks"
+    config_get log_l settings log_l "4"
+    config_get lport settings port "1080"
+    config_get crt settings crt
+    config_get ssl_verify settings ssl_verify
+    config_get dns settings dns
+    config_get ping_i settings ping_i
+
+    mkdir -p /var/pegasocks
+
+    json_init
+    json_add_array "servers"
+    config_foreach load_server "pegasocks_server"
+    json_close_array
+    if [ -n "$crt" ] || [ -n "$ssl_verify" ]; then
+	json_add_object "ssl"
+	if [ -n "crt" ]; then
+            json_add_string "cert" "$crt"
+	fi
+	if [ -n "$ssl_verify" ]; then
+            json_add_boolean "verify" "$verify"
+	fi
+	json_close_object
+    fi
+    if [ -n "$dns" ]; then
+	json_add_array "dns_servers"
+	for dn in $dns
+	do 
+	    json_add_string "" "$dn"
+	done
+	json_close_array
+    fi
+    if [ -n "$ping_i" ]; then
+	json_add_int "ping_interval" "$ping_i"
+    fi
+    json_add_string "local_address" "$lanaddr"
+    json_add_int "local_port" "$lport"
+    json_add_int "log_level" "$log_l"
+    json_pretty
+    json_dump > /var/pegasocks/$1
+    json_cleanup
+
+
+    [ -e /etc/pegasocks/$1 ] || ln -nsf /var/pegasocks/$1 /etc/pegasocks/$1
+
+}
+
+service_triggers() {
+    procd_add_reload_trigger pegasocks
+}
+
+start_service() {
+    local tr_enable treads
+    config_load pegasocks
+    config_get_bool tr_enable settings enable_tp 0
+    config_get treads settings treads_count 4
+    load_config $SETTINGS
+
+    if [ ! -e /etc/pegasocks/$SETTINGS ]; then
+        logger -p daemon.error -t 'pegasocks' "missing config /etc/pegasocks/$SETTINGS!"
+        exit 1
+    fi
+
+    procd_open_instance
+    procd_set_param command /usr/bin/pegas
+    procd_append_param command -t $treads
+    procd_append_param command -c /etc/pegasocks/$SETTINGS
+    procd_set_param pidfile /var/run/pegasocks.pid
+    procd_set_param file /etc/pegasocks/$SETTINGS
+    procd_set_param netdev "br-lan"
+    procd_set_param stdout 1                                          
+    procd_set_param stderr 1 
+
+    procd_open_data
+    if [ "$tr_enable" = "1" ]; then 
+        json_add_array firewall
+        enable_tr_proxy
+        json_close_array
+    fi
+    procd_close_data
+    procd_close_instance
+}
+
+service_started()
+{
+    procd_set_config_changed firewall
+}
+
+stop_service()
+{
+    procd_set_config_changed firewall
+}
+

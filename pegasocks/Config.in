@@ -1,0 +1,17 @@
+if PACKAGE_pegasocks
+
+comment "SSL support"
+
+choice
+	prompt "Selected SSL library"
+		default PEGASOCKS_MBEDTLS
+
+	config PEGASOCKS_MBEDTLS
+		bool "mbed TLS"
+
+	config PEGASOCKS_OPENSSL
+		bool "OpenSSL"
+
+endchoice
+
+endif
