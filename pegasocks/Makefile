@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 # Name and release number of this package
 PKG_NAME:=pegasocks
 PKG_VERSION:=0.3
-PKG_RELEASE:=13
+PKG_RELEASE:=15
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=COPYING
 
