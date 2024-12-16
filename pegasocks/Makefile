@@ -7,8 +7,8 @@ include $(TOPDIR)/rules.mk
 
 # Name and release number of this package
 PKG_NAME:=pegasocks
-PKG_VERSION:=0.3
-PKG_RELEASE:=15
+PKG_VERSION:=0.4
+PKG_RELEASE:=5
 PKG_LICENSE:=BSD-3-Clause
 PKG_LICENSE_FILES:=COPYING
 
@@ -35,7 +35,7 @@ define Package/pegasocks
 	CATEGORY:=Network
 	SUBMENU:=VPN
 	TITLE:=pegasocks
-	DEPENDS:= +PEGASOCKS_OPENSSL:libopenssl +PEGASOCKS_MBEDTLS:libmbedtls +PEGASOCKS_MBEDTLS:libevent2-mbedtls +libevent2-core +libevent2-extra +libevent2-pthreads +libpthread
+	DEPENDS:= +PEGASOCKS_OPENSSL:libopenssl +PEGASOCKS_MBEDTLS:libmbedtls +libevent2-core +libevent2-extra +libevent2-pthreads +libpthread
 	MENU:=1
 endef
 

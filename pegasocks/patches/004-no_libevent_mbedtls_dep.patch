@@ -1,0 +1,140 @@
+--- a/include/pegasocks/ssl.h	2023-03-31 08:31:02.000000000 +0300
++++ b/include/pegasocks/ssl.h	2024-12-16 22:12:57.157496533 +0300
+@@ -3,7 +3,9 @@
+ 
+ #include "config.h"
+ 
++#ifndef USE_MBEDTLS
+ #include <event2/bufferevent_ssl.h>
++#endif
+ 
+ struct pgs_ssl_ctx_s;
+ 
+ typedef struct pgs_ssl_ctx_s pgs_ssl_ctx_t;
+--- a/src/ssl/mbedtls.c	2023-03-31 08:31:02.000000000 +0300
++++ b/src/ssl/mbedtls.c	2024-12-17 00:57:11.429855465 +0300
+@@ -83,31 +83,40 @@
+ }
+ 
+ int pgs_session_outbound_ssl_bev_init(struct bufferevent **bev, int fd,
+-				      struct event_base *base,
+-				      pgs_ssl_ctx_t *ssl_ctx, const char *sni)
++					struct event_base *base,
++					pgs_ssl_ctx_t *ssl_ctx, const char *sni)
+ {
+ 	// notice: should be freed when bev is freed
++	// Allocate and initialize the mbedTLS SSL context
+ 	mbedtls_ssl_context *ssl = malloc(sizeof(mbedtls_ssl_context));
+-
++	if (!ssl) {
++		return -1; // Memory allocation failure
++	}
+ 	mbedtls_ssl_init(ssl);
+ 
++	// Set up the mbedTLS SSL context
+ 	int ret = 0;
+ 	if ((ret = mbedtls_ssl_setup(ssl, &ssl_ctx->conf)) != 0) {
++		mbedtls_ssl_free(ssl);
++		free(ssl);
+ 		return -1;
+ 	}
+ 	if ((ret = mbedtls_ssl_set_hostname(ssl, sni)) != 0) {
++		mbedtls_ssl_free(ssl);
++		free(ssl);
++		return -1;
++	}
++
++	// Create a new bufferevent with the initialized mbedTLS SSL context
++	*bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
++	if (!*bev) {
++		mbedtls_ssl_free(ssl);
++		free(ssl);
+ 		return -1;
+ 	}
+ 
+-	*bev = bufferevent_mbedtls_socket_new(base, fd, ssl,
+-					      BUFFEREVENT_SSL_CONNECTING,
+-					      BEV_OPT_DEFER_CALLBACKS);
+-#ifdef BUFFEREVENT_SSL_BATCH_WRITE
+-	bufferevent_ssl_set_flags(*bev, BUFFEREVENT_SSL_DIRTY_SHUTDOWN |
+-						BUFFEREVENT_SSL_BATCH_WRITE);
+-#else
+-	bufferevent_mbedtls_set_allow_dirty_shutdown(*bev, 1);
+-#endif
++	// Set callbacks and associate mbedTLS SSL context as the cbarg
++	bufferevent_setcb(*bev, NULL, NULL, NULL, ssl);
+ 
+ 	return 0;
+ }
+--- a/src/session/outbound.c	2023-03-31 08:31:02.000000000 +0300
++++ b/src/session/outbound.c	2024-12-17 00:54:07.504556563 +0300
+@@ -6,7 +6,9 @@
+ 
+ #include <event2/buffer.h>
+ #include <event2/bufferevent.h>
++#ifndef USE_MBEDTLS
+ #include <event2/bufferevent_ssl.h>
++#endif
+ #include <event2/util.h>
+ 
+ #include <stdio.h>
+@@ -272,8 +271,7 @@
+ 
+ // outbound
+ 
+-void pgs_session_outbound_free(pgs_session_outbound_t *ptr)
+-{
++void pgs_session_outbound_free(pgs_session_outbound_t *ptr) {
+ #ifdef WITH_ACL
+ 	if (ptr->param != NULL) {
+ 		// may be used by dns callback, update it to NULL, mark this session is terminated
+@@ -287,6 +285,7 @@
+ #ifdef USE_MBEDTLS
+ 		bool is_be_ssl = false;
+ 		const pgs_server_config_t *config = ptr->config;
++
+ 		if (IS_V2RAY_SERVER(config->server_type)) {
+ 			pgs_config_extra_v2ray_t *vconf =
+ 				(pgs_config_extra_v2ray_t *)config->extra;
+@@ -294,23 +293,36 @@
+ 				is_be_ssl = true;
+ 			}
+ 		}
++
+ 		if (IS_TROJAN_SERVER(config->server_type)) {
+ 			is_be_ssl = true;
+ 		}
++
+ 		int fd = bufferevent_getfd(ptr->bev);
+ 
+ 		if (is_be_ssl) {
+-			mbedtls_ssl_context *ssl =
+-				bufferevent_mbedtls_get_ssl(ptr->bev);
++			// Retrieve and clean up the SSL context
++			bufferevent_data_cb readcb = NULL;
++			bufferevent_data_cb writecb = NULL;
++			bufferevent_event_cb eventcb = NULL;
++			void *cbarg = NULL;
++
++			bufferevent_getcb(ptr->bev, &readcb, &writecb, &eventcb, &cbarg);
++
++			mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)cbarg;
++			if (ssl) {
++				mbedtls_ssl_free(ssl);
++				free(ssl);
++			}
++
+ 			bufferevent_free(ptr->bev);
+-			mbedtls_ssl_free(ssl);
+-			free(ssl);
+ 		} else {
+ 			bufferevent_free(ptr->bev);
+ 		}
+ 
+-		if (fd)
++		if (fd) {
+ 			evutil_closesocket(fd);
++		}
+ #else
+ 		bufferevent_free(ptr->bev);
+ #endif
