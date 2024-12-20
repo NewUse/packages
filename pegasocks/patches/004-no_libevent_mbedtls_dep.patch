@@ -1,26 +1,294 @@
---- a/include/pegasocks/ssl.h	2023-03-31 08:31:02.000000000 +0300
-+++ b/include/pegasocks/ssl.h	2024-12-16 22:12:57.157496533 +0300
-@@ -3,7 +3,9 @@
+--- a/src/session/outbound.c	2023-03-31 08:31:02.000000000 +0300
++++ b/src/session/outbound.c	2024-12-20 21:46:52.703224415 +0300
+@@ -6,7 +6,11 @@
  
- #include "config.h"
- 
-+#ifndef USE_MBEDTLS
+ #include <event2/buffer.h>
+ #include <event2/bufferevent.h>
++#ifdef USE_MBEDTLS
++#include "ssl.h"
++#else
  #include <event2/bufferevent_ssl.h>
 +#endif
+ #include <event2/util.h>
  
- struct pgs_ssl_ctx_s;
+ #include <stdio.h>
+@@ -287,6 +291,7 @@
+ #ifdef USE_MBEDTLS
+ 		bool is_be_ssl = false;
+ 		const pgs_server_config_t *config = ptr->config;
++
+ 		if (IS_V2RAY_SERVER(config->server_type)) {
+ 			pgs_config_extra_v2ray_t *vconf =
+ 				(pgs_config_extra_v2ray_t *)config->extra;
+@@ -294,23 +299,36 @@
+ 				is_be_ssl = true;
+ 			}
+ 		}
++
+ 		if (IS_TROJAN_SERVER(config->server_type)) {
+ 			is_be_ssl = true;
+ 		}
++
+ 		int fd = bufferevent_getfd(ptr->bev);
  
- typedef struct pgs_ssl_ctx_s pgs_ssl_ctx_t;
---- a/src/ssl/mbedtls.c	2023-03-31 08:31:02.000000000 +0300
-+++ b/src/ssl/mbedtls.c	2024-12-17 00:57:11.429855465 +0300
-@@ -83,31 +83,40 @@
+ 		if (is_be_ssl) {
+-			mbedtls_ssl_context *ssl =
+-				bufferevent_mbedtls_get_ssl(ptr->bev);
++			// Retrieve and clean up the SSL context
++			pgs_bev_ctx_t *bev_ctx = NULL;
++			bufferevent_getcb(ptr->bev, NULL, NULL, NULL, (void *)&bev_ctx);
++
++			mbedtls_ssl_context *ssl = bev_ctx->ssl;
++			if (ssl != NULL) {
++				mbedtls_ssl_free(ssl);
++				free(ssl);
++			}
++
++			if (bev_ctx != NULL) {
++				free(bev_ctx);
++			}
++
+ 			bufferevent_free(ptr->bev);
+-			mbedtls_ssl_free(ssl);
+-			free(ssl);
+ 		} else {
+ 			bufferevent_free(ptr->bev);
+ 		}
+ 
+-		if (fd)
++		if (fd) {
+ 			evutil_closesocket(fd);
++		}
+ #else
+ 		bufferevent_free(ptr->bev);
+ #endif
+@@ -364,7 +382,15 @@
+ 		goto error;
+ 
+ 	assert(event_cb && read_cb && ptr->bev);
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = NULL;
++	bufferevent_getcb(ptr->bev, NULL, NULL, NULL, (void *)&bev_ctx);
++	bev_ctx->cb_ctx = cb_ctx;
++
++	bufferevent_setcb(ptr->bev, read_cb, NULL, event_cb, bev_ctx);
++#else
+ 	bufferevent_setcb(ptr->bev, read_cb, NULL, event_cb, cb_ctx);
++#endif
+ 
+ 	return true;
+ 
+--- a/src/server/metrics.c	2023-03-31 08:31:02.000000000 +0300
++++ b/src/server/metrics.c	2024-12-20 00:23:22.878101390 +0300
+@@ -7,6 +7,10 @@
+ #include "applet.h"
+ #endif
+ 
++#ifdef USE_MBEDTLS
++#include "ssl.h"
++#endif
++
+ const unsigned char g204_cmd[] = { 0x05, 0x01, 0x00, 0x03, 0x0d, 0x77, 0x77,
+ 				   0x77, 0x2e, 0x67, 0x6f, 0x6f, 0x67, 0x6c,
+ 				   0x65, 0x2e, 0x63, 0x6e, 0x00, 0x50 };
+@@ -48,7 +52,12 @@
+ static void on_trojan_g204_event(struct bufferevent *bev, short events,
+ 				 void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
+ 	if (events & BEV_EVENT_TIMEOUT) {
+ 		pgs_logger_error(mctx->logger, "(%s)%s:%d g204 timeout",
+ 				 mctx->config->server_type,
+@@ -68,7 +77,12 @@
+ 
+ static void on_trojan_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
+ 	const pgs_config_extra_trojan_t *tconfig = mctx->config->extra;
+ 	if (tconfig->websocket.enabled) {
+ 		on_trojan_ws_g204_read(bev, ctx);
+@@ -80,7 +94,13 @@
+ static void on_v2ray_g204_event(struct bufferevent *bev, short events,
+ 				void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	if (events & BEV_EVENT_TIMEOUT) {
+ 		pgs_logger_error(mctx->logger, "v2ray g204 timeout");
+ 		if (mctx)
+@@ -97,7 +117,12 @@
+ 
+ static void on_v2ray_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
+ 	const pgs_config_extra_v2ray_t *vconfig = mctx->config->extra;
+ 	if (vconfig->websocket.enabled) {
+ 		on_v2ray_ws_g204_read(bev, ctx);
+@@ -182,7 +207,13 @@
+ 
+ static void on_ws_g204_event(struct bufferevent *bev, short events, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	if (events & BEV_EVENT_CONNECTED)
+ 		do_ws_remote_request(bev, ctx);
+ 	if (events & BEV_EVENT_ERROR)
+@@ -197,7 +228,13 @@
+ 
+ static void on_trojan_ws_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	pgs_logger_debug(mctx->logger, "remote read triggered");
+ 	struct evbuffer *output = bufferevent_get_output(bev);
+ 	struct evbuffer *input = bufferevent_get_input(bev);
+@@ -256,7 +293,13 @@
+ 
+ static void on_v2ray_ws_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	struct evbuffer *output = bufferevent_get_output(bev);
+ 	struct evbuffer *input = bufferevent_get_input(bev);
+ 
+@@ -300,7 +343,13 @@
+ static void on_trojan_gfw_g204_read(struct bufferevent *bev, void *ctx)
+ {
+ 	// with data
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	double g204_time = elapse(mctx->start_at);
+ 	pgs_logger_debug(mctx->logger, "g204: %f", g204_time);
+ 	pgs_metrics_update(&mctx->sm->server_stats[mctx->server_idx],
+@@ -311,7 +360,13 @@
+ 				     void *ctx)
+ {
+ 	// connect time and error handling
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	if (events & BEV_EVENT_CONNECTED) {
+ 		// set connected
+ 		pgs_outbound_ctx_trojan_t *sctx = mctx->outbound->ctx;
+@@ -343,7 +398,13 @@
  }
+ static void on_v2ray_tcp_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	double g204_time = elapse(mctx->start_at);
+ 	pgs_logger_debug(mctx->logger, "g204: %f", g204_time);
+ 	pgs_metrics_update(&mctx->sm->server_stats[mctx->server_idx],
+@@ -354,7 +415,13 @@
  
- int pgs_session_outbound_ssl_bev_init(struct bufferevent **bev, int fd,
--				      struct event_base *base,
--				      pgs_ssl_ctx_t *ssl_ctx, const char *sni)
-+					struct event_base *base,
-+					pgs_ssl_ctx_t *ssl_ctx, const char *sni)
+ static void on_ss_g204_read(struct bufferevent *bev, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	double g204_time = elapse(mctx->start_at);
+ 	pgs_logger_debug(mctx->logger, "g204: %f", g204_time);
+ 	pgs_metrics_update(&mctx->sm->server_stats[mctx->server_idx],
+@@ -365,7 +432,13 @@
+ 
+ static void on_ss_g204_event(struct bufferevent *bev, short events, void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	if (events & BEV_EVENT_TIMEOUT) {
+ 		pgs_logger_error(mctx->logger, "shadowsocks g204 timeout");
+ 		if (mctx)
+@@ -403,7 +476,13 @@
+ static void on_v2ray_tcp_g204_event(struct bufferevent *bev, short events,
+ 				    void *ctx)
+ {
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
+ 	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	if (events & BEV_EVENT_CONNECTED) {
+ 		// set connected
+ 		pgs_outbound_ctx_v2ray_t *sctx = mctx->outbound->ctx;
+--- a/src/ssl/mbedtls.c	2023-03-31 08:31:02.000000000 +0300
++++ b/src/ssl/mbedtls.c	2024-12-20 21:49:06.279365975 +0300
+@@ -8,12 +8,14 @@
+ 
+ #include <stdlib.h>
+ 
++/*
+ struct pgs_ssl_ctx_s {
+ 	mbedtls_ssl_config conf;
+ 	mbedtls_entropy_context entropy;
+ 	mbedtls_ctr_drbg_context ctr_drbg;
+ 	mbedtls_x509_crt cacert;
+ };
++*/
+ 
+ pgs_ssl_ctx_t *pgs_ssl_ctx_new(pgs_config_t *config)
+ {
+@@ -87,27 +89,40 @@
+ 				      pgs_ssl_ctx_t *ssl_ctx, const char *sni)
  {
  	// notice: should be freed when bev is freed
 +	// Allocate and initialize the mbedTLS SSL context
@@ -62,79 +330,46 @@
 -	bufferevent_mbedtls_set_allow_dirty_shutdown(*bev, 1);
 -#endif
 +	// Set callbacks and associate mbedTLS SSL context as the cbarg
-+	bufferevent_setcb(*bev, NULL, NULL, NULL, ssl);
++	pgs_bev_ctx_t *bev_ctx = malloc(sizeof(pgs_bev_ctx_t));
++	bev_ctx->ssl = ssl;
++	bev_ctx->cb_ctx = NULL;
++
++	bufferevent_setcb(*bev, NULL, NULL, NULL, bev_ctx);
  
  	return 0;
  }
---- a/src/session/outbound.c	2023-03-31 08:31:02.000000000 +0300
-+++ b/src/session/outbound.c	2024-12-17 00:54:07.504556563 +0300
-@@ -6,7 +6,9 @@
+--- a/include/pegasocks/ssl.h	2024-12-17 02:08:38.298874233 +0300
++++ b/include/pegasocks/ssl.h	2024-12-20 00:08:52.075673879 +0300
+@@ -3,11 +3,32 @@
  
- #include <event2/buffer.h>
- #include <event2/bufferevent.h>
-+#ifndef USE_MBEDTLS
+ #include "config.h"
+ 
++#ifdef USE_MBEDTLS
++#include <mbedtls/ssl.h>
++#include <mbedtls/entropy.h>
++#include <mbedtls/ctr_drbg.h>
++#else
  #include <event2/bufferevent_ssl.h>
 +#endif
- #include <event2/util.h>
  
- #include <stdio.h>
-@@ -272,8 +271,7 @@
+ struct pgs_ssl_ctx_s;
  
- // outbound
++#ifdef USE_MBEDTLS
++typedef struct pgs_ssl_ctx_s {
++	mbedtls_ssl_config conf;
++	mbedtls_entropy_context entropy;
++	mbedtls_ctr_drbg_context ctr_drbg;
++	mbedtls_x509_crt cacert;
++} pgs_ssl_ctx_t;
++
++typedef struct {
++	mbedtls_ssl_context *ssl;
++	void *cb_ctx;
++} pgs_bev_ctx_t;
++
++#else
+ typedef struct pgs_ssl_ctx_s pgs_ssl_ctx_t;
++#endif
  
--void pgs_session_outbound_free(pgs_session_outbound_t *ptr)
--{
-+void pgs_session_outbound_free(pgs_session_outbound_t *ptr) {
- #ifdef WITH_ACL
- 	if (ptr->param != NULL) {
- 		// may be used by dns callback, update it to NULL, mark this session is terminated
-@@ -287,6 +285,7 @@
- #ifdef USE_MBEDTLS
- 		bool is_be_ssl = false;
- 		const pgs_server_config_t *config = ptr->config;
-+
- 		if (IS_V2RAY_SERVER(config->server_type)) {
- 			pgs_config_extra_v2ray_t *vconf =
- 				(pgs_config_extra_v2ray_t *)config->extra;
-@@ -294,23 +293,36 @@
- 				is_be_ssl = true;
- 			}
- 		}
-+
- 		if (IS_TROJAN_SERVER(config->server_type)) {
- 			is_be_ssl = true;
- 		}
-+
- 		int fd = bufferevent_getfd(ptr->bev);
- 
- 		if (is_be_ssl) {
--			mbedtls_ssl_context *ssl =
--				bufferevent_mbedtls_get_ssl(ptr->bev);
-+			// Retrieve and clean up the SSL context
-+			bufferevent_data_cb readcb = NULL;
-+			bufferevent_data_cb writecb = NULL;
-+			bufferevent_event_cb eventcb = NULL;
-+			void *cbarg = NULL;
-+
-+			bufferevent_getcb(ptr->bev, &readcb, &writecb, &eventcb, &cbarg);
-+
-+			mbedtls_ssl_context *ssl = (mbedtls_ssl_context *)cbarg;
-+			if (ssl) {
-+				mbedtls_ssl_free(ssl);
-+				free(ssl);
-+			}
-+
- 			bufferevent_free(ptr->bev);
--			mbedtls_ssl_free(ssl);
--			free(ssl);
- 		} else {
- 			bufferevent_free(ptr->bev);
- 		}
- 
--		if (fd)
-+		if (fd) {
- 			evutil_closesocket(fd);
-+		}
- #else
- 		bufferevent_free(ptr->bev);
- #endif
+ pgs_ssl_ctx_t *pgs_ssl_ctx_new(pgs_config_t *config);
+ void pgs_ssl_ctx_free(pgs_ssl_ctx_t *ctx);
