@@ -270,6 +270,21 @@
  	if (events & BEV_EVENT_CONNECTED) {
  		// set connected
  		pgs_outbound_ctx_v2ray_t *sctx = mctx->outbound->ctx;
+@@ -433,7 +512,13 @@
+ 
+ static void do_ws_remote_request(struct bufferevent *bev, void *ctx)
+ {
+-	pgs_metrics_task_ctx_t *mctx = (pgs_metrics_task_ctx_t *)ctx;
++#ifdef USE_MBEDTLS
++	pgs_bev_ctx_t *bev_ctx = ctx;
++	pgs_metrics_task_ctx_t *mctx = bev_ctx->cb_ctx;
++#else
++	pgs_metrics_task_ctx_t *mctx = ctx;
++#endif
++
+ 	const pgs_server_config_t *config = mctx->outbound->config;
+ 
+ 	const pgs_config_ws_t *ws_config = config->extra;
 --- a/src/ssl/mbedtls.c	2023-03-31 08:31:02.000000000 +0300
 +++ b/src/ssl/mbedtls.c	2024-12-20 21:49:06.279365975 +0300
 @@ -8,12 +8,14 @@
